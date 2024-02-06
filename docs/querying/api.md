@@ -543,6 +543,7 @@ GET /api/v1/targets
 ```
 
 Both the active and dropped targets are part of the response by default.
+Dropped targets are subject to `keep_dropped_targets` limit, if set.
 `labels` represents the label set after relabeling has occurred.
 `discoveredLabels` represent the unmodified labels retrieved during service discovery before relabeling has occurred.
 
@@ -678,6 +679,7 @@ URL query parameters:
 - `rule_name[]=<string>`: only return rules with the given rule name. If the parameter is repeated, rules with any of the provided names are returned. If we've filtered out all the rules of a group, the group is not returned. When the parameter is absent or empty, no filtering is done.
 - `rule_group[]=<string>`: only return rules with the given rule group name. If the parameter is repeated, rules with any of the provided rule group names are returned. When the parameter is absent or empty, no filtering is done.
 - `file[]=<string>`: only return rules with the given filepath. If the parameter is repeated, rules with any of the provided filepaths are returned. When the parameter is absent or empty, no filtering is done.
+- `exclude_alerts=<bool>`: only return rules, do not return active alerts.
 
 ```json
 $ curl http://localhost:9090/api/v1/rules
@@ -1294,3 +1296,16 @@ Enable the remote write receiver by setting
 endpoint is `/api/v1/write`. Find more details [here](../storage.md#overview).
 
 *New in v2.33*
+
+## OTLP Receiver
+
+Prometheus can be configured as a receiver for the OTLP Metrics protocol. This 
+is not considered an efficient way of ingesting samples. Use it
+with caution for specific low-volume use cases. It is not suitable for
+replacing the ingestion via scraping.
+
+Enable the OTLP receiver by the feature flag
+`--enable-feature=otlp-write-receiver`. When enabled, the OTLP receiver
+endpoint is `/api/v1/otlp/v1/metrics`.
+
+*New in v2.47*

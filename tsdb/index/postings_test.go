@@ -17,13 +17,13 @@ import (
 	"container/heap"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sort"
 	"strconv"
 	"testing"
 
-	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/prometheus/model/labels"
@@ -61,9 +61,7 @@ func TestMemPostings_ensureOrder(t *testing.T) {
 			ok := sort.SliceIsSorted(l, func(i, j int) bool {
 				return l[i] < l[j]
 			})
-			if !ok {
-				t.Fatalf("postings list %v is not sorted", l)
-			}
+			require.True(t, ok, "postings list %v is not sorted", l)
 		}
 	}
 }
@@ -214,9 +212,7 @@ func TestIntersect(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run("", func(t *testing.T) {
-			if c.res == nil {
-				t.Fatal("intersect result expectancy cannot be nil")
-			}
+			require.NotNil(t, c.res, "intersect result expectancy cannot be nil")
 
 			expected, err := ExpandPostings(c.res)
 			require.NoError(t, err)
@@ -228,9 +224,7 @@ func TestIntersect(t *testing.T) {
 				return
 			}
 
-			if i == EmptyPostings() {
-				t.Fatal("intersect unexpected result: EmptyPostings sentinel")
-			}
+			require.NotEqual(t, EmptyPostings(), i, "intersect unexpected result: EmptyPostings sentinel")
 
 			res, err := ExpandPostings(i)
 			require.NoError(t, err)
@@ -380,12 +374,44 @@ func BenchmarkIntersect(t *testing.B) {
 	})
 }
 
+func BenchmarkMerge(t *testing.B) {
+	var lps []*ListPostings
+	var refs [][]storage.SeriesRef
+
+	// Create 100000 matchers(k=100000), making sure all memory allocation is done before starting the loop.
+	for i := 0; i < 100000; i++ {
+		var temp []storage.SeriesRef
+		for j := 1; j < 100; j++ {
+			temp = append(temp, storage.SeriesRef(i+j*100000))
+		}
+		lps = append(lps, newListPostings(temp...))
+		refs = append(refs, temp)
+	}
+
+	its := make([]Postings, len(refs))
+	for _, nSeries := range []int{1, 10, 100, 1000, 10000, 100000} {
+		t.Run(fmt.Sprint(nSeries), func(bench *testing.B) {
+			ctx := context.Background()
+			for i := 0; i < bench.N; i++ {
+				// Reset the ListPostings to their original values each time round the loop.
+				for j := range refs[:nSeries] {
+					lps[j].list = refs[j]
+					its[j] = lps[j]
+				}
+				if err := consumePostings(Merge(ctx, its[:nSeries]...)); err != nil {
+					bench.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 func TestMultiMerge(t *testing.T) {
 	i1 := newListPostings(1, 2, 3, 4, 5, 6, 1000, 1001)
 	i2 := newListPostings(2, 4, 5, 6, 7, 8, 999, 1001)
 	i3 := newListPostings(1, 2, 5, 6, 7, 8, 1001, 1200)
 
-	res, err := ExpandPostings(Merge(i1, i2, i3))
+	res, err := ExpandPostings(Merge(context.Background(), i1, i2, i3))
 	require.NoError(t, err)
 	require.Equal(t, []storage.SeriesRef{1, 2, 3, 4, 5, 6, 7, 8, 999, 1000, 1001, 1200}, res)
 }
@@ -469,23 +495,21 @@ func TestMergedPostings(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run("", func(t *testing.T) {
-			if c.res == nil {
-				t.Fatal("merge result expectancy cannot be nil")
-			}
+			require.NotNil(t, c.res, "merge result expectancy cannot be nil")
+
+			ctx := context.Background()
 
 			expected, err := ExpandPostings(c.res)
 			require.NoError(t, err)
 
-			m := Merge(c.in...)
+			m := Merge(ctx, c.in...)
 
 			if c.res == EmptyPostings() {
-				require.Equal(t, EmptyPostings(), m)
+				require.False(t, m.Next())
 				return
 			}
 
-			if m == EmptyPostings() {
-				t.Fatal("merge unexpected result: EmptyPostings sentinel")
-			}
+			require.NotEqual(t, EmptyPostings(), m, "merge unexpected result: EmptyPostings sentinel")
 
 			res, err := ExpandPostings(m)
 			require.NoError(t, err)
@@ -537,10 +561,12 @@ func TestMergedPostingsSeek(t *testing.T) {
 	}
 
 	for _, c := range cases {
+		ctx := context.Background()
+
 		a := newListPostings(c.a...)
 		b := newListPostings(c.b...)
 
-		p := Merge(a, b)
+		p := Merge(ctx, a, b)
 
 		require.Equal(t, c.success, p.Seek(c.seek))
 
@@ -796,6 +822,7 @@ func TestIntersectWithMerge(t *testing.T) {
 	a := newListPostings(21, 22, 23, 24, 25, 30)
 
 	b := Merge(
+		context.Background(),
 		newListPostings(10, 20, 30),
 		newListPostings(15, 26, 30),
 	)
@@ -860,9 +887,7 @@ func TestWithoutPostings(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run("", func(t *testing.T) {
-			if c.res == nil {
-				t.Fatal("without result expectancy cannot be nil")
-			}
+			require.NotNil(t, c.res, "without result expectancy cannot be nil")
 
 			expected, err := ExpandPostings(c.res)
 			require.NoError(t, err)
@@ -874,9 +899,7 @@ func TestWithoutPostings(t *testing.T) {
 				return
 			}
 
-			if w == EmptyPostings() {
-				t.Fatal("without unexpected result: EmptyPostings sentinel")
-			}
+			require.NotEqual(t, EmptyPostings(), w, "without unexpected result: EmptyPostings sentinel")
 
 			res, err := ExpandPostings(w)
 			require.NoError(t, err)
@@ -972,7 +995,7 @@ func TestMemPostings_Delete(t *testing.T) {
 	deleted := p.Get("lbl1", "b")
 	expanded, err = ExpandPostings(deleted)
 	require.NoError(t, err)
-	require.Equal(t, 0, len(expanded), "expected empty postings, got %v", expanded)
+	require.Empty(t, expanded, "expected empty postings, got %v", expanded)
 }
 
 func TestFindIntersectingPostings(t *testing.T) {
@@ -1112,4 +1135,150 @@ func TestPostingsWithIndexHeap(t *testing.T) {
 		require.Equal(t, 2, node.index)
 		require.Equal(t, storage.SeriesRef(25), node.p.At())
 	})
+}
+
+func TestListPostings(t *testing.T) {
+	t.Run("empty list", func(t *testing.T) {
+		p := NewListPostings(nil)
+		require.False(t, p.Next())
+		require.False(t, p.Seek(10))
+		require.False(t, p.Next())
+		require.NoError(t, p.Err())
+	})
+
+	t.Run("one posting", func(t *testing.T) {
+		t.Run("next", func(t *testing.T) {
+			p := NewListPostings([]storage.SeriesRef{10})
+			require.True(t, p.Next())
+			require.Equal(t, storage.SeriesRef(10), p.At())
+			require.False(t, p.Next())
+			require.NoError(t, p.Err())
+		})
+		t.Run("seek less", func(t *testing.T) {
+			p := NewListPostings([]storage.SeriesRef{10})
+			require.True(t, p.Seek(5))
+			require.Equal(t, storage.SeriesRef(10), p.At())
+			require.True(t, p.Seek(5))
+			require.Equal(t, storage.SeriesRef(10), p.At())
+			require.False(t, p.Next())
+			require.NoError(t, p.Err())
+		})
+		t.Run("seek equal", func(t *testing.T) {
+			p := NewListPostings([]storage.SeriesRef{10})
+			require.True(t, p.Seek(10))
+			require.Equal(t, storage.SeriesRef(10), p.At())
+			require.False(t, p.Next())
+			require.NoError(t, p.Err())
+		})
+		t.Run("seek more", func(t *testing.T) {
+			p := NewListPostings([]storage.SeriesRef{10})
+			require.False(t, p.Seek(15))
+			require.False(t, p.Next())
+			require.NoError(t, p.Err())
+		})
+		t.Run("seek after next", func(t *testing.T) {
+			p := NewListPostings([]storage.SeriesRef{10})
+			require.True(t, p.Next())
+			require.False(t, p.Seek(15))
+			require.False(t, p.Next())
+			require.NoError(t, p.Err())
+		})
+	})
+
+	t.Run("multiple postings", func(t *testing.T) {
+		t.Run("next", func(t *testing.T) {
+			p := NewListPostings([]storage.SeriesRef{10, 20})
+			require.True(t, p.Next())
+			require.Equal(t, storage.SeriesRef(10), p.At())
+			require.True(t, p.Next())
+			require.Equal(t, storage.SeriesRef(20), p.At())
+			require.False(t, p.Next())
+			require.NoError(t, p.Err())
+		})
+		t.Run("seek", func(t *testing.T) {
+			p := NewListPostings([]storage.SeriesRef{10, 20})
+			require.True(t, p.Seek(5))
+			require.Equal(t, storage.SeriesRef(10), p.At())
+			require.True(t, p.Seek(5))
+			require.Equal(t, storage.SeriesRef(10), p.At())
+			require.True(t, p.Seek(10))
+			require.Equal(t, storage.SeriesRef(10), p.At())
+			require.True(t, p.Next())
+			require.Equal(t, storage.SeriesRef(20), p.At())
+			require.True(t, p.Seek(10))
+			require.Equal(t, storage.SeriesRef(20), p.At())
+			require.True(t, p.Seek(20))
+			require.Equal(t, storage.SeriesRef(20), p.At())
+			require.False(t, p.Next())
+			require.NoError(t, p.Err())
+		})
+		t.Run("seek lest than last", func(t *testing.T) {
+			p := NewListPostings([]storage.SeriesRef{10, 20, 30, 40, 50})
+			require.True(t, p.Seek(45))
+			require.Equal(t, storage.SeriesRef(50), p.At())
+			require.False(t, p.Next())
+		})
+		t.Run("seek exactly last", func(t *testing.T) {
+			p := NewListPostings([]storage.SeriesRef{10, 20, 30, 40, 50})
+			require.True(t, p.Seek(50))
+			require.Equal(t, storage.SeriesRef(50), p.At())
+			require.False(t, p.Next())
+		})
+		t.Run("seek more than last", func(t *testing.T) {
+			p := NewListPostings([]storage.SeriesRef{10, 20, 30, 40, 50})
+			require.False(t, p.Seek(60))
+			require.False(t, p.Next())
+		})
+	})
+
+	t.Run("seek", func(t *testing.T) {
+		for _, c := range []int{2, 8, 9, 10} {
+			t.Run(fmt.Sprintf("count=%d", c), func(t *testing.T) {
+				list := make([]storage.SeriesRef, c)
+				for i := 0; i < c; i++ {
+					list[i] = storage.SeriesRef(i * 10)
+				}
+
+				t.Run("all one by one", func(t *testing.T) {
+					p := NewListPostings(list)
+					for i := 0; i < c; i++ {
+						require.True(t, p.Seek(storage.SeriesRef(i*10)))
+						require.Equal(t, storage.SeriesRef(i*10), p.At())
+					}
+					require.False(t, p.Seek(storage.SeriesRef(c*10)))
+				})
+
+				t.Run("each one", func(t *testing.T) {
+					for _, ref := range list {
+						p := NewListPostings(list)
+						require.True(t, p.Seek(ref))
+						require.Equal(t, ref, p.At())
+					}
+				})
+			})
+		}
+	})
+}
+
+// BenchmarkListPostings benchmarks ListPostings by iterating Next/At sequentially.
+// See also BenchmarkIntersect as it performs more `At` calls than `Next` calls when intersecting.
+func BenchmarkListPostings(b *testing.B) {
+	const maxCount = 1e6
+	input := make([]storage.SeriesRef, maxCount)
+	for i := 0; i < maxCount; i++ {
+		input[i] = storage.SeriesRef(i << 2)
+	}
+
+	for _, count := range []int{100, 1e3, 10e3, 100e3, maxCount} {
+		b.Run(fmt.Sprintf("count=%d", count), func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				p := NewListPostings(input[:count])
+				var sum storage.SeriesRef
+				for p.Next() {
+					sum += p.At()
+				}
+				require.NotZero(b, sum)
+			}
+		})
+	}
 }

@@ -324,6 +324,25 @@ Run labels query.
 
 
 
+##### `promtool query analyze`
+
+Run queries against your Prometheus to analyze the usage pattern of certain metrics.
+
+
+
+###### Flags
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| <code class="text-nowrap">--server</code> | Prometheus server to query. |  |
+| <code class="text-nowrap">--type</code> | Type of metric: histogram. |  |
+| <code class="text-nowrap">--duration</code> | Time frame to analyze. | `1h` |
+| <code class="text-nowrap">--time</code> | Query time (RFC3339 or Unix timestamp), defaults to now. |  |
+| <code class="text-nowrap">--match</code> | Series selector. Can be specified multiple times. |  |
+
+
+
+
 ### `promtool debug`
 
 Fetch debug information.
@@ -429,6 +448,16 @@ Unit tests for rules.
 
 
 
+###### Flags
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| <code class="text-nowrap">--run</code> | If set, will only run test groups whose names match the regular expression. Can be specified multiple times. |  |
+| <code class="text-nowrap">--diff</code> | [Experimental] Print colored differential output between expected & received output. | `false` |
+
+
+
+
 ###### Arguments
 
 | Argument | Description | Required |
@@ -488,6 +517,7 @@ Analyze churn, label pair cardinality and compaction efficiency.
 | --- | --- | --- |
 | <code class="text-nowrap">--limit</code> | How many items to show in each list. | `20` |
 | <code class="text-nowrap">--extended</code> | Run extended analysis. |  |
+| <code class="text-nowrap">--match</code> | Series selector to analyze. Only 1 set of matchers is supported now. |  |
 
 
 
@@ -538,7 +568,7 @@ Dump samples from a TSDB.
 | --- | --- | --- |
 | <code class="text-nowrap">--min-time</code> | Minimum timestamp to dump. | `-9223372036854775808` |
 | <code class="text-nowrap">--max-time</code> | Maximum timestamp to dump. | `9223372036854775807` |
-| <code class="text-nowrap">--match</code> | Series selector. | `{__name__=~'(?s:.*)'}` |
+| <code class="text-nowrap">--match</code> | Series selector. Can be specified multiple times. | `{__name__=~'(?s:.*)'}` |
 
 
 

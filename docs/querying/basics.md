@@ -35,7 +35,7 @@ vector is the only type that can be directly graphed.
 _Notes about the experimental native histograms:_
 
 * Ingesting native histograms has to be enabled via a [feature
-  flag](../feature_flags/#native-histograms).
+  flag](../../feature_flags.md#native-histograms).
 * Once native histograms have been ingested into the TSDB (and even after
   disabling the feature flag again), both instant vectors and range vectors may
   now contain samples that aren't simple floating point numbers (float samples)
@@ -212,8 +212,8 @@ While the following would be *incorrect*:
 
     sum(http_requests_total{method="GET"}) offset 5m // INVALID.
 
-The same works for range vectors. This returns the 5-minute rate that
-`http_requests_total` had a week ago:
+The same works for range vectors. This returns the 5-minute [rate](./functions.md#rate)
+that `http_requests_total` had a week ago:
 
     rate(http_requests_total[5m] offset 1w)
 

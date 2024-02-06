@@ -12,7 +12,6 @@
 // limitations under the License.
 
 //go:build !windows
-// +build !windows
 
 package tsdb
 
@@ -49,7 +48,7 @@ func TestSegmentWAL_cut(t *testing.T) {
 	require.NoError(t, w.cut())
 
 	// Cutting creates a new file.
-	require.Equal(t, 2, len(w.files))
+	require.Len(t, w.files, 2)
 
 	require.NoError(t, w.write(WALEntrySeries, 1, []byte("Hello World!!")))
 
@@ -409,7 +408,7 @@ func TestWALRestoreCorrupted(t *testing.T) {
 			r := w2.Reader()
 
 			serf := func(l []record.RefSeries) {
-				require.Equal(t, 0, len(l))
+				require.Empty(t, l)
 			}
 
 			// Weird hack to check order of reads.
@@ -529,7 +528,7 @@ func TestMigrateWAL_Fuzz(t *testing.T) {
 			require.NoError(t, err)
 			res = append(res, s)
 		default:
-			t.Fatalf("unknown record type %d", dec.Type(rec))
+			require.Fail(t, "unknown record type %d", dec.Type(rec))
 		}
 	}
 	require.NoError(t, r.Err())

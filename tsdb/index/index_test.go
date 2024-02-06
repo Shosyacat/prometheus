@@ -15,15 +15,14 @@ package index
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/crc32"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
 
-	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
@@ -66,7 +65,7 @@ func (m mockIndex) Symbols() (map[string]struct{}, error) {
 
 func (m mockIndex) AddSeries(ref storage.SeriesRef, l labels.Labels, chunks ...chunks.Meta) error {
 	if _, ok := m.series[ref]; ok {
-		return errors.Errorf("series with reference %d already added", ref)
+		return fmt.Errorf("series with reference %d already added", ref)
 	}
 	l.Range(func(lbl labels.Label) {
 		m.symbols[lbl.Name] = struct{}{}
@@ -93,7 +92,7 @@ func (m mockIndex) Close() error {
 	return nil
 }
 
-func (m mockIndex) LabelValues(name string) ([]string, error) {
+func (m mockIndex) LabelValues(_ context.Context, name string) ([]string, error) {
 	values := []string{}
 	for l := range m.postings {
 		if l.Name == name {
@@ -103,19 +102,19 @@ func (m mockIndex) LabelValues(name string) ([]string, error) {
 	return values, nil
 }
 
-func (m mockIndex) Postings(name string, values ...string) (Postings, error) {
+func (m mockIndex) Postings(ctx context.Context, name string, values ...string) (Postings, error) {
 	p := []Postings{}
 	for _, value := range values {
 		l := labels.Label{Name: name, Value: value}
 		p = append(p, m.SortedPostings(NewListPostings(m.postings[l])))
 	}
-	return Merge(p...), nil
+	return Merge(ctx, p...), nil
 }
 
 func (m mockIndex) SortedPostings(p Postings) Postings {
 	ep, err := ExpandPostings(p)
 	if err != nil {
-		return ErrPostings(errors.Wrap(err, "expand postings"))
+		return ErrPostings(fmt.Errorf("expand postings: %w", err))
 	}
 
 	sort.Slice(ep, func(i, j int) bool {
@@ -162,6 +161,7 @@ func TestIndexRW_Create_Open(t *testing.T) {
 
 func TestIndexRW_Postings(t *testing.T) {
 	dir := t.TempDir()
+	ctx := context.Background()
 
 	fn := filepath.Join(dir, indexFilename)
 
@@ -194,7 +194,7 @@ func TestIndexRW_Postings(t *testing.T) {
 	ir, err := NewFileReader(fn)
 	require.NoError(t, err)
 
-	p, err := ir.Postings("a", "1")
+	p, err := ir.Postings(ctx, "a", "1")
 	require.NoError(t, err)
 
 	var c []chunks.Meta
@@ -204,7 +204,7 @@ func TestIndexRW_Postings(t *testing.T) {
 		err := ir.Series(p.At(), &builder, &c)
 
 		require.NoError(t, err)
-		require.Equal(t, 0, len(c))
+		require.Empty(t, c)
 		require.Equal(t, series[i], builder.Labels())
 	}
 	require.NoError(t, p.Err())
@@ -228,7 +228,7 @@ func TestIndexRW_Postings(t *testing.T) {
 		d := encoding.NewDecbufAt(ir.b, int(off), castagnoliTable)
 		require.Equal(t, 1, d.Be32int(), "Unexpected number of label indices table names")
 		for i := d.Be32(); i > 0 && d.Err() == nil; i-- {
-			v, err := ir.lookupSymbol(d.Be32())
+			v, err := ir.lookupSymbol(ctx, d.Be32())
 			require.NoError(t, err)
 			labelIndices[lbl] = append(labelIndices[lbl], v)
 		}
@@ -241,10 +241,63 @@ func TestIndexRW_Postings(t *testing.T) {
 	}, labelIndices)
 
 	require.NoError(t, ir.Close())
+
+	t.Run("ShardedPostings()", func(t *testing.T) {
+		ir, err := NewFileReader(fn)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			require.NoError(t, ir.Close())
+		})
+
+		// List all postings for a given label value. This is what we expect to get
+		// in output from all shards.
+		p, err = ir.Postings(ctx, "a", "1")
+		require.NoError(t, err)
+
+		var expected []storage.SeriesRef
+		for p.Next() {
+			expected = append(expected, p.At())
+		}
+		require.NoError(t, p.Err())
+		require.NotEmpty(t, expected)
+
+		// Query the same postings for each shard.
+		const shardCount = uint64(4)
+		actualShards := make(map[uint64][]storage.SeriesRef)
+		actualPostings := make([]storage.SeriesRef, 0, len(expected))
+
+		for shardIndex := uint64(0); shardIndex < shardCount; shardIndex++ {
+			p, err = ir.Postings(ctx, "a", "1")
+			require.NoError(t, err)
+
+			p = ir.ShardedPostings(p, shardIndex, shardCount)
+			for p.Next() {
+				ref := p.At()
+
+				actualShards[shardIndex] = append(actualShards[shardIndex], ref)
+				actualPostings = append(actualPostings, ref)
+			}
+			require.NoError(t, p.Err())
+		}
+
+		// We expect the postings merged out of shards is the exact same of the non sharded ones.
+		require.ElementsMatch(t, expected, actualPostings)
+
+		// We expect the series in each shard are the expected ones.
+		for shardIndex, ids := range actualShards {
+			for _, id := range ids {
+				var lbls labels.ScratchBuilder
+
+				require.NoError(t, ir.Series(id, &lbls, nil))
+				require.Equal(t, shardIndex, labels.StableHash(lbls.Labels())%shardCount)
+			}
+		}
+	})
 }
 
 func TestPostingsMany(t *testing.T) {
 	dir := t.TempDir()
+	ctx := context.Background()
 
 	fn := filepath.Join(dir, indexFilename)
 
@@ -313,7 +366,7 @@ func TestPostingsMany(t *testing.T) {
 
 	var builder labels.ScratchBuilder
 	for _, c := range cases {
-		it, err := ir.Postings("i", c.in...)
+		it, err := ir.Postings(ctx, "i", c.in...)
 		require.NoError(t, err)
 
 		got := []string{}
@@ -335,6 +388,7 @@ func TestPostingsMany(t *testing.T) {
 
 func TestPersistence_index_e2e(t *testing.T) {
 	dir := t.TempDir()
+	ctx := context.Background()
 
 	lbls, err := labels.ReadLabels(filepath.Join("..", "testdata", "20kseries.json"), 20000)
 	require.NoError(t, err)
@@ -352,15 +406,17 @@ func TestPersistence_index_e2e(t *testing.T) {
 
 	var input indexWriterSeriesSlice
 
+	ref := uint64(0)
 	// Generate ChunkMetas for every label set.
 	for i, lset := range lbls {
 		var metas []chunks.Meta
 
 		for j := 0; j <= (i % 20); j++ {
+			ref++
 			metas = append(metas, chunks.Meta{
 				MinTime: int64(j * 10000),
-				MaxTime: int64((j + 1) * 10000),
-				Ref:     chunks.ChunkRef(rand.Uint64()),
+				MaxTime: int64((j+1)*10000) - 1,
+				Ref:     chunks.ChunkRef(ref),
 				Chunk:   chunkenc.NewXORChunk(),
 			})
 		}
@@ -413,10 +469,10 @@ func TestPersistence_index_e2e(t *testing.T) {
 	require.NoError(t, err)
 
 	for p := range mi.postings {
-		gotp, err := ir.Postings(p.Name, p.Value)
+		gotp, err := ir.Postings(ctx, p.Name, p.Value)
 		require.NoError(t, err)
 
-		expp, err := mi.Postings(p.Name, p.Value)
+		expp, err := mi.Postings(ctx, p.Name, p.Value)
 		require.NoError(t, err)
 
 		var chks, expchks []chunks.Meta
@@ -446,7 +502,7 @@ func TestPersistence_index_e2e(t *testing.T) {
 	for k, v := range labelPairs {
 		sort.Strings(v)
 
-		res, err := ir.SortedLabelValues(k)
+		res, err := ir.SortedLabelValues(ctx, k)
 		require.NoError(t, err)
 
 		require.Equal(t, len(v), len(res))
@@ -562,7 +618,104 @@ func TestSymbols(t *testing.T) {
 	require.NoError(t, iter.Err())
 }
 
+func BenchmarkReader_ShardedPostings(b *testing.B) {
+	const (
+		numSeries = 10000
+		numShards = 16
+	)
+
+	dir, err := os.MkdirTemp("", "benchmark_reader_sharded_postings")
+	require.NoError(b, err)
+	defer func() {
+		require.NoError(b, os.RemoveAll(dir))
+	}()
+
+	ctx := context.Background()
+
+	// Generate an index.
+	fn := filepath.Join(dir, indexFilename)
+
+	iw, err := NewWriter(ctx, fn)
+	require.NoError(b, err)
+
+	for i := 1; i <= numSeries; i++ {
+		require.NoError(b, iw.AddSymbol(fmt.Sprintf("%10d", i)))
+	}
+	require.NoError(b, iw.AddSymbol("const"))
+	require.NoError(b, iw.AddSymbol("unique"))
+
+	for i := 1; i <= numSeries; i++ {
+		require.NoError(b, iw.AddSeries(storage.SeriesRef(i),
+			labels.FromStrings("const", fmt.Sprintf("%10d", 1), "unique", fmt.Sprintf("%10d", i))))
+	}
+
+	require.NoError(b, iw.Close())
+
+	b.ResetTimer()
+
+	// Create a reader to read back all postings from the index.
+	ir, err := NewFileReader(fn)
+	require.NoError(b, err)
+
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		allPostings, err := ir.Postings(ctx, "const", fmt.Sprintf("%10d", 1))
+		require.NoError(b, err)
+
+		ir.ShardedPostings(allPostings, uint64(n%numShards), numShards)
+	}
+}
+
 func TestDecoder_Postings_WrongInput(t *testing.T) {
 	_, _, err := (&Decoder{}).Postings([]byte("the cake is a lie"))
 	require.Error(t, err)
+}
+
+func TestChunksRefOrdering(t *testing.T) {
+	dir := t.TempDir()
+
+	idx, err := NewWriter(context.Background(), filepath.Join(dir, "index"))
+	require.NoError(t, err)
+
+	require.NoError(t, idx.AddSymbol("1"))
+	require.NoError(t, idx.AddSymbol("2"))
+	require.NoError(t, idx.AddSymbol("__name__"))
+
+	c50 := chunks.Meta{Ref: 50}
+	c100 := chunks.Meta{Ref: 100}
+	c200 := chunks.Meta{Ref: 200}
+
+	require.NoError(t, idx.AddSeries(1, labels.FromStrings("__name__", "1"), c100))
+	require.EqualError(t, idx.AddSeries(2, labels.FromStrings("__name__", "2"), c50), "unsorted chunk reference: 50, previous: 100")
+	require.NoError(t, idx.AddSeries(2, labels.FromStrings("__name__", "2"), c200))
+	require.NoError(t, idx.Close())
+}
+
+func TestChunksTimeOrdering(t *testing.T) {
+	dir := t.TempDir()
+
+	idx, err := NewWriter(context.Background(), filepath.Join(dir, "index"))
+	require.NoError(t, err)
+
+	require.NoError(t, idx.AddSymbol("1"))
+	require.NoError(t, idx.AddSymbol("2"))
+	require.NoError(t, idx.AddSymbol("__name__"))
+
+	require.NoError(t, idx.AddSeries(1, labels.FromStrings("__name__", "1"),
+		chunks.Meta{Ref: 1, MinTime: 0, MaxTime: 10}, // Also checks that first chunk can have MinTime: 0.
+		chunks.Meta{Ref: 2, MinTime: 11, MaxTime: 20},
+		chunks.Meta{Ref: 3, MinTime: 21, MaxTime: 30},
+	))
+
+	require.EqualError(t, idx.AddSeries(1, labels.FromStrings("__name__", "2"),
+		chunks.Meta{Ref: 10, MinTime: 0, MaxTime: 10},
+		chunks.Meta{Ref: 20, MinTime: 10, MaxTime: 20},
+	), "chunk minT 10 is not higher than previous chunk maxT 10")
+
+	require.EqualError(t, idx.AddSeries(1, labels.FromStrings("__name__", "2"),
+		chunks.Meta{Ref: 10, MinTime: 100, MaxTime: 30},
+	), "chunk maxT 30 is less than minT 100")
+
+	require.NoError(t, idx.Close())
 }
